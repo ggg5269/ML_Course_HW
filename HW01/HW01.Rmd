@@ -1,0 +1,305 @@
+---
+title: "Machine Learning HW_01"
+author: "0753736_陳懷安"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+```
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from random import randint, shuffle
+import sys
+sys.version
+```
+
+```{python}
+data_x = pd.read_csv('dataset_X.csv').iloc[:,1:]
+data_t = pd.read_csv('dataset_T.csv').iloc[:,1:]
+```
+
+## Solve Equation  
+
+### define M for poly  
+
+Here I just make the polynomial $\phi(x)$ up to $M = 2$. 
+But for Gaussian basis function, I set it up to the number of total variables.  
+
+```{python}
+def two(x):
+    sq = pd.DataFrame()
+    for i in range(x.shape[1]):
+        for j in range(x.shape[1]):
+            if j >= i:
+                row = []
+                for k in range(x.shape[0]):
+                    row.extend([x.iloc[k, i]*x.iloc[k, j]])
+                str = data_x.columns.values[i]+'*'+data_x.columns.values[j]
+                sq[str] = row
+    return sq
+```
+
+### define $\Phi$ matrix  
+
+So the elements of polynomial basis function design matrix $\Phi(x)$ will look like:  
+$$\phi_j(x_i)= \Sigma \ \Pi_{i=0}^j x_i$$
+
+```{python}
+def get_polyphi(x, M):
+    inter = pd.DataFrame({'C': np.repeat(1, len(x), axis=0).transpose()}).astype('float32').reset_index(drop=True)
+    onep = x.reset_index(drop=True)
+    sq = two(x).reset_index(drop=True)
+    
+    if M == 0:
+        phi = pd.concat([inter], axis=1, ignore_index=True).values
+    elif M == 1:
+        phi = pd.concat([inter, onep], axis=1, ignore_index=True).values
+    elif M == 2:
+        phi = pd.concat([inter, onep, sq], axis=1, ignore_index=True).values
+    else:
+        return print("invalid M")
+    return phi
+```
+
+For the Gaussian basis function, the form is shown below:  
+$$\phi_j(x)=\rm{exp}\left\{-\frac{(x-\mu_j)^2}{2s^2}\right\},\ where\ s = 0.1$$  
+
+```{python}
+def get_gaussphi(x, M):
+    # s = np.std(x)
+    # s = 0.1
+    if M > x.shape[1]:
+        return "M input invalid"
+    else:
+        inter = pd.DataFrame({'C': np.repeat(1, len(x), axis=0).transpose()}).astype('float32').reset_index(drop=True)
+        f = lambda x: np.exp(-((x-np.mean(x))**2)/(2*(np.std(x))**2))
+        phi = pd.concat([inter, x.apply(f).iloc[:, 0:M]], axis=1, ignore_index=True)
+    return phi
+```
+
+### Solve $w$  
+
+By linear regression close form, we may solve $w$ with the equation below.  
+$$w = (\lambda I + \Phi^T  \Phi)^{-1} \Phi^T  y$$
+
+```{python}
+def solve_reg(x, y, M, lam, f):
+    y = y.values
+    phi = f(x, M)    
+    w = np.linalg.inv(lam* np.eye(phi.shape[1]) + phi.T @ phi) @ phi.T @ y
+    return (w, phi)
+```
+
+## define Cross Validation  
+
+### split data  
+
+Here I'll define a function to help me with splitting the data into pieces, dealing with cross validation process or even batch learning.  
+
+```{python}
+def get_ID(dataset):
+    list0 = ([x for x in range(dataset.shape[0])])
+    shuffle(list0)
+    return list0
+
+def split_ID(list0, val_size:float):
+    return ([list0[i:i + int(val_size*len(list0))] for i in range(0, len(list0), int(val_size*len(list0)))])
+
+def split_ID2(list0, piles):
+    p = [[] for _ in range(piles)]
+    for i in range(len(list0)):
+        for j in range(piles):
+            if i % piles == j:
+                p[j].append(list0[i])
+    return [p][0]
+```
+
+### CV  
+
+The cross validation will done by the function which will sequentially input train dataset and validation dataset by the dataset we get with the splitting function. And will ultimately leave the best model for us to go further.  
+
+```{python}
+def cross_val(x, t, piles, M, lam, fun):
+    """
+    Parameters
+    ------------
+    x, t: training and target data
+    piles: split data into piles
+    M: hyperparameters for basis function
+    lam: regularization term
+    fun: basis function
+    """
+    p = split_ID2(get_ID(x), piles)
+    CV_RMSE = []
+    train_RMSE = []
+    for i in range(len(p)):
+        cv_x = x.loc[p[i]].reset_index(drop=True)
+        cv_t = t.loc[p[i]].reset_index(drop=True)
+        sub_x = x.loc[~x.index.isin(p[i])].reset_index(drop=True)
+        sub_t = t.loc[~t.index.isin(p[i])].reset_index(drop=True)
+        w, phi = solve_reg(sub_x, sub_t, M, lam, fun)
+        res_CV = ((np.ones(cv_t.shape[0]) @ ((fun(cv_x, M) @ w - cv_t.values)**2))/cv_t.shape[0])**0.5
+        res_train = ((np.ones(sub_t.shape[0]) @ ((phi @ w - sub_t.values)**2))/sub_t.shape[0])**0.5
+        CV_RMSE.append(res_CV[0])
+        train_RMSE.append(res_train[0])
+        if res_CV[0] == min(CV_RMSE):
+            w_m = w
+            i_L = i
+            #print(i, "update")
+        RMSE = pd.DataFrame({'train_RMSE': train_RMSE, 'CV_RMSE': CV_RMSE})
+    print("by RMSE, we choose fold {} for the training.".format(i_L))
+    return RMSE, w_m
+```
+
+## define search function for hyperparameter  
+
+The hyperparameter here is $\rm M$, to determine how many **features** are going to modelling $\rm Y$.  
+
+```{python}
+def search_hyper(x, t, piles, M, lam, fun):
+    RMSE_min = float('inf')
+    i_min = None
+
+    for i in range(M):
+        print("iter: {}".format(i))
+        M_G = cross_val(x, t, piles, i, lam, fun)
+        if np.min(M_G[0].iloc[:, 1:])[0] < RMSE_min:
+            RMSE_min = np.min(M_G[0].iloc[:, 1:])[0]
+            i_min = i
+            w_opt = M_G[1]
+    print("\nFrom iteration {}, we got the lowest CV_RMSE: {}, and the weight is save to w_opt".format(i_min, RMSE_min))
+    return [w_opt, i_min]
+```
+
+
+```{python}
+def get_post(x, y, s0, m0, M):
+    beta = 0.2
+    y = y.values
+    phi = get_gaussphi(x, M)
+    sn = np.linalg.inv(np.linalg.inv(s0) + beta*(phi.T @ phi))
+    mn = sn @ (np.linalg.inv(s0) @ m0 + beta*(phi.T @ y))
+    return [sn, mn]
+```
+
+
+```{python}
+def batch_learn(x, t, piles, s0, m0, M):
+    p = split_ID2(get_ID(x), piles)
+    sn = s0
+    mn = m0
+    for i in range(len(p)):
+        sub_x = x.loc[~x.index.isin(p[i])].reset_index(drop=True)
+        sub_t = t.loc[~t.index.isin(p[i])].reset_index(drop=True)
+        MAP = get_post(sub_x, sub_t, sn, mn, M)
+    
+    return MAP
+```
+
+## 1. Feature Selection  
+
+### a. In the feature selection stage, please apply polynomials of order M = 1 and M = 2 over the dimension D = 17 of input data.  
+**Please evaluate the corresponding RMS error on the training set and validation set.**   
+
+```{python, echo = T}
+M_2 = cross_val(data_x, data_t, 5, 2, 0, get_polyphi)
+M_1 = cross_val(data_x, data_t, 5, 1, 0, get_polyphi)
+```
+
+The RMSE for each iteration are:  
+
+```{python, echo = T}
+M_1[0]
+M_2[0]
+```
+
+> From the result above, we can easily find out that train_RMSE is lower when M = 2, but CV_RMSE gets higher simultaneously.  
+We may say it's the consequence of overfitting becuase the model is too complex.  
+
+### b. Please analyze the **weights of polynomial models for $\rm M = 1$** and select the most contributive attribute which has the lowest RMS error on the Training Dataset.   
+
+```{python, echo = T}
+M_1[1]
+```
+
+> The list above is the $w$ of the model which provides the lowest CV_RMSE when $\rm M = 1$.  
+
+## 2. Maximum Likelihood Approach  
+
+### a. **Choose some of air quality measurement** in dataset X.csv and design your model.  
+You can choose any basis functions you like and implemented the feature vector.  
+
+> Here I **selected 10 air quality measurements** as independent variables, and conducted a cross-validation process to make sure that the model won't be over-fitting.   
+
+```{python, echo = T}
+M_G_10 = cross_val(data_x, data_t, 5, 10, 0, get_gaussphi)
+```
+
+
+```{python, echo = T}
+M_G_10[0]
+```
+
+### b. Apply N-fold cross-validation in your training stage to select at least one hyperparameter (order, parameter number, ...) for model and do some discussion (underfitting, overfitting).   
+
+I go through 18 variables and try how many of them put into the model will provide a best prediction.  
+
+```{python, echo = T}
+w_SP = search_hyper(data_x, data_t, 7, 18, 1, get_gaussphi)
+```
+
+> **w_opt**(the $w$ of the best model) is shown in the chunk below.   
+
+```{python, echo = T}
+w_SP
+```
+
+## 3. Maximum a posteriori approach  
+
+### a. Use maximum a posteriori approach method and repeat **2.(a)** and **2.(b)**. You could choose Gaussian distribution as a prior.   
+
+> I'll choose **Gaussian basis function** here, and try to calculate the posterior distribution.  
+>   
+> Add a Gaussian noise to the model:  
+> $$\epsilon \sim N(0,\ \beta)$$  
+> We may renew our parameters by the functions below:   
+>   
+> $$p(w|t) = N(w|m_N,\ S_N)\ \rm{,where\ } \\ S_N^{-1} = S_0^{-1} + \beta \Phi^T \Phi\\m_N = S_N (S_0^{-1}m_0 + \beta \Phi^T y)$$  
+
+```{python, echo = T}
+M = w_SP[1]
+m0 = np.zeros(M+1).reshape(-1,1)
+s0 = 2*np.eye(M+1)
+beta = 0.2
+```
+
+```{python, echo = T}
+mn = batch_learn(data_x, data_t, 100, s0, m0, M)[1]
+M_G_ML = cross_val(data_x, data_t, 7, 5, 0, get_gaussphi)
+```
+
+### b. Compare the result between maximum likelihood approach and maximum a posteriori approach.   
+
+> The results below, I'll show the RMSE of $w$ from MAP first and then from Maximize Likelihood.   
+
+```{python, echo = T}
+((np.ones(data_t.shape[0]) @ ((get_gaussphi(data_x, M) @ mn - data_t.values)**2))/data_t.shape[0])**0.5
+```
+
+```{python, echo = T}
+M_G_ML[0]
+```
+
+
